@@ -1,4 +1,5 @@
-// Pulls this week's DraftKings NFL classic and Showdown slates and Sleeper projections into OUT_DIR
+// Pulls this week's DraftKings NFL classic and Showdown slates, Sleeper projections and
+// Daily Fantasy Fuel projections into OUT_DIR
 // (default _site/data), which the workflow deploys straight to GitHub Pages.
 // Nothing is committed to the repo, so no old weeks pile up in git history.
 // Runs on GitHub's servers. Node 20+, no dependencies.
@@ -213,6 +214,66 @@ async function fetchSleeper() {
   return out;
 }
 
+// ---------- Daily Fantasy Fuel ----------
+// Their free projections page has a "Download Projections as CSV" link. The job reads the page,
+// follows that link, and falls back to the table rows on the page if no link is found.
+const DFF_PAGES = { dk: 'https://www.dailyfantasyfuel.com/nfl/projections/draftkings', fd: 'https://www.dailyfantasyfuel.com/nfl/projections/fanduel' };
+const decode = s => String(s).replace(/&amp;/g, '&').replace(/&#39;|&apos;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+
+export function dffFromCSV(text) {
+  const rows = parseCSV(text);
+  if (rows.length < 2) return [];
+  const H = rows[0].map(x => x.trim().toLowerCase());
+  const at = (...n) => { for (const k of n) { const i = H.indexOf(k); if (i >= 0) return i; } return -1; };
+  let iName = at('name', 'player', 'player_name', 'full_name');
+  const iF = at('first_name', 'first name'), iL = at('last_name', 'last name');
+  const iPos = at('position', 'pos'), iTeam = at('team', 'tm');
+  let iProj = at('ppg_projection', 'projection', 'proj', 'fpts', 'projected_points');
+  if (iProj < 0) iProj = H.findIndex(h => /proj/.test(h));
+  if ((iName < 0 && (iF < 0 || iL < 0)) || iProj < 0) return [];
+  const out = [];
+  for (const r of rows.slice(1)) {
+    const name = iName >= 0 ? (r[iName] || '').trim() : `${r[iF] || ''} ${r[iL] || ''}`.trim();
+    const proj = parseFloat(r[iProj]);
+    if (!name || isNaN(proj)) continue;
+    out.push({ name, pos: iPos >= 0 ? (r[iPos] || '').trim() : '', team: iTeam >= 0 ? (r[iTeam] || '').trim() : '', proj: +proj.toFixed(2) });
+  }
+  return out;
+}
+
+export function dffFromHTML(html) {
+  const out = [];
+  for (const m of html.matchAll(/<tr\b([^>]*\bdata-[^>]*)>/gi)) {
+    const attrs = {};
+    for (const a of m[1].matchAll(/data-([\w-]+)\s*=\s*"([^"]*)"/g)) attrs[a[1].toLowerCase()] = decode(a[2]);
+    const name = attrs.name || attrs.player || attrs['player-name'];
+    const pk = Object.keys(attrs).find(k => k === 'ppg_proj') || Object.keys(attrs).find(k => /proj/.test(k) && !/own/.test(k));
+    const proj = pk ? parseFloat(attrs[pk]) : NaN;
+    if (!name || isNaN(proj)) continue;
+    out.push({ name, pos: attrs.pos || attrs.position || '', team: attrs.team || '', proj: +proj.toFixed(2) });
+  }
+  return out;
+}
+
+async function fetchDFF(site) {
+  const page = DFF_PAGES[site];
+  const html = await get(page, 'text');
+  const slate = (html.match(/<title>([^<]*)<\/title>/i) || [])[1] || '';
+  const links = [...html.matchAll(/href\s*=\s*"([^"]+)"/gi)].map(m => decode(m[1]))
+    .filter(u => /\.csv|csv|download|export/i.test(u));
+  for (const l of links) {
+    const url = new URL(l, page).toString();
+    try {
+      const players = dffFromCSV(await get(url, 'text', 2));
+      if (players.length >= 20) { console.log(`DFF ${site}: ${players.length} players from CSV ${url}`); return { players, url }; }
+    } catch (e) { console.log(`  DFF ${site}: CSV link failed (${e.message})`); }
+  }
+  const players = dffFromHTML(html);
+  if (players.length >= 20) { console.log(`DFF ${site}: ${players.length} players from the page table`); return { players, url: page }; }
+  console.log(`DFF ${site}: no projections found. Page ${html.length} chars, ${links.length} CSV-like links: ${links.slice(0, 5).join(' | ') || 'none'}; title: ${slate.trim().slice(0, 80)}`);
+  return { players: [], url: page };
+}
+
 // ---------- main ----------
 async function main() {
   await fs.mkdir(path.join(OUT, 'dk'), { recursive: true });
@@ -253,6 +314,28 @@ async function main() {
     if (prev && prev.sleeper) {
       try { await copyPrevious(prev.sleeper.file); manifest.sleeper = prev.sleeper; console.log(`Sleeper: kept last good data from ${prev.sleeper.updated}`); }
       catch (e) { console.error('Could not copy previous Sleeper data:', e.message); }
+    }
+  }
+
+  manifest.dff = {};
+  for (const site of ['dk', 'fd']) {
+    let done = false;
+    try {
+      const r = await fetchDFF(site);
+      if (r.players.length) {
+        const file = `dff-${site}.json`;
+        await fs.writeFile(path.join(OUT, file), JSON.stringify({ site, updated: new Date().toISOString(), players: r.players }));
+        manifest.dff[site] = { updated: new Date().toISOString(), count: r.players.length, file };
+        done = true;
+      }
+    } catch (e) { console.error(`DFF ${site} failed:`, e.message); }
+    if (!done) {
+      const prev = await previous();
+      const p = prev && prev.dff && prev.dff[site];
+      if (p) {
+        try { await copyPrevious(p.file); manifest.dff[site] = p; console.log(`DFF ${site}: kept last good data from ${p.updated}`); }
+        catch (e) { console.error(`Could not copy previous DFF ${site} data:`, e.message); }
+      }
     }
   }
 
