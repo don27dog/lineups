@@ -1,0 +1,64 @@
+name: Update data and deploy
+
+# Fetches fresh data and deploys the site straight to GitHub Pages.
+# The data is never committed, so the repo doesn't grow week to week.
+on:
+  schedule:
+    # Times are UTC. ET is UTC-5 from November on, UTC-4 before that.
+    - cron: '15 2,14,20 * * 2-6'   # Tue-Sat, 3 times a day
+    - cron: '15 21 * * 4'          # Thursday afternoon, before TNF
+    - cron: '15 13-17 * * 0'       # Sunday morning, every hour until 1pm ET lock
+  push:
+    branches: [main]               # redeploy when you change the app
+  workflow_dispatch: {}            # "Run workflow" button on the Actions tab
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+  actions: write   # lets the job keep its own schedule from being paused
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - id: pages
+        uses: actions/configure-pages@v5
+      - name: Copy the app and its icon
+        run: mkdir -p _site && cp -r index.html manifest.webmanifest icons _site/
+      - name: Fetch DraftKings slates and Sleeper projections
+        run: node scripts/fetch-data.mjs
+        env:
+          OUT_DIR: _site/data
+          SITE_URL: ${{ steps.pages.outputs.base_url }}
+      - name: Keep the schedule active
+        # GitHub pauses schedules after 60 days without commits. Re-enabling
+        # through the API resets that without adding any commits.
+        if: github.event_name == 'schedule'
+        continue-on-error: true
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/update-data.yml/enable"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+          retention-days: 1
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
