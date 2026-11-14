@@ -1,32 +1,32 @@
 // Pulls this week's DraftKings NFL classic and Showdown slates and Sleeper projections into OUT_DIR
 // (default _site/data), which the workflow deploys straight to GitHub Pages.
 // Nothing is committed to the repo, so no old weeks pile up in git history.
-// Runs on GitHub's servers (no browser CORS limits). Node 20+, no dependencies.
-// These DraftKings and Sleeper endpoints are public but unofficial: if one fails,
+// Runs on GitHub's servers. Node 20+, no dependencies.
+// DraftKings and Sleeper endpoints are public but unofficial: if one fails,
 // the script copies the last good data from the live site (SITE_URL) instead.
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
 const OUT = path.resolve(process.env.OUT_DIR || '_site/data');
 const SITE = (process.env.SITE_URL || '').replace(/\/$/, '');
-const HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
-  'Accept': 'application/json',
-};
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36';
+const HEADERS = { 'User-Agent': UA, 'Accept': 'application/json, text/plain, */*', 'Accept-Language': 'en-US,en;q=0.9',
+  'Referer': 'https://www.draftkings.com/lobby', 'Origin': 'https://www.draftkings.com' };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-export async function getJSON(url, tries = 3) {
+async function get(url, as = 'json', tries = 3) {
   for (let i = 1; ; i++) {
     try {
-      const r = await fetch(url, { headers: HEADERS });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return await r.json();
+      const r = await fetch(url, { headers: as === 'text' ? { ...HEADERS, Accept: 'text/csv, text/plain, */*' } : HEADERS });
+      if (!r.ok) { const e = new Error(`HTTP ${r.status}`); e.status = r.status; throw e; }
+      return as === 'text' ? await r.text() : await r.json();
     } catch (e) {
-      if (i >= tries) throw new Error(`${e.message} for ${url}`);
+      if (e.status === 403 || e.status === 404 || i >= tries) { e.message = `${e.message} for ${url}`; throw e; }
       await sleep(1500 * i);
     }
   }
 }
+export const getJSON = (url, tries) => get(url, 'json', tries);
 
 // Last good data from the currently deployed site, used only when a source fails
 let prevCache;
@@ -39,6 +39,58 @@ async function previous() {
 async function copyPrevious(file) {
   const body = await getJSON(`${SITE}/data/${file}`, 2);
   await fs.writeFile(path.join(OUT, file), JSON.stringify(body));
+}
+
+// ---------- CSV ----------
+export function parseCSV(text) {
+  const rows = []; let row = [], f = '', q = false;
+  text = text.replace(/^﻿/, '');
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) { if (c === '"') { if (text[i + 1] === '"') { f += '"'; i++; } else q = false; } else f += c; }
+    else if (c === '"') q = true;
+    else if (c === ',') { row.push(f); f = ''; }
+    else if (c === '\n' || c === '\r') { if (c === '\r' && text[i + 1] === '\n') i++; row.push(f); rows.push(row); row = []; f = ''; }
+    else f += c;
+  }
+  if (f !== '' || row.length) { row.push(f); rows.push(row); }
+  return rows.filter(r => r.some(x => x.trim() !== ''));
+}
+
+// "KC@BUF 11/15/2026 01:00PM ET" -> { away, home, startTime }
+function gameInfo(s) {
+  const m = String(s || '').match(/^([A-Z]{2,4})@([A-Z]{2,4})\s+(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+  if (!m) { const t = String(s || '').match(/^([A-Z]{2,4})@([A-Z]{2,4})/); return t ? { away: t[1], home: t[2], startTime: null } : {}; }
+  let [, away, home, mo, d, y, h, mi, ap] = m; h = +h % 12 + (ap.toUpperCase() === 'PM' ? 12 : 0);
+  const off = (+mo >= 4 && +mo <= 10) ? '-04:00' : '-05:00';
+  const iso = `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}T${String(h).padStart(2, '0')}:${mi}:00${off}`;
+  return { away, home, startTime: new Date(iso).toISOString() };
+}
+
+// DraftKings salary CSV -> the same shape as the draftables API
+export function csvToDraftables(text) {
+  const rows = parseCSV(text);
+  const hi = rows.findIndex(r => r.map(x => x.trim().toLowerCase()).includes('salary'));
+  if (hi < 0) return [];
+  const start = rows[hi].findIndex(x => x.trim() !== '');
+  const H = rows[hi].slice(start).map(x => x.trim().toLowerCase());
+  const col = n => H.indexOf(n);
+  const iPos = col('position'), iName = col('name'), iId = col('id'), iRP = col('roster position'),
+    iSal = col('salary'), iGame = col('game info'), iTeam = col('teamabbrev');
+  const out = [];
+  for (const raw of rows.slice(hi + 1)) {
+    const r = raw.slice(start);
+    const name = (r[iName] || '').trim(), team = (r[iTeam] || '').trim();
+    if (!name) continue;
+    const g = gameInfo(r[iGame]);
+    out.push({
+      draftableId: (r[iId] || '').trim(), playerId: name + '|' + team, displayName: name,
+      position: (r[iPos] || '').trim(), salary: +String(r[iSal] || '').replace(/[$,]/g, '') || 0,
+      teamAbbreviation: team, rosterSlotId: (r[iRP] || '').trim(),
+      competition: { name: g.away ? `${g.away} @ ${g.home}` : '', startTime: g.startTime },
+    });
+  }
+  return out;
 }
 
 // ---------- DraftKings ----------
@@ -80,13 +132,26 @@ function slateLabel(g, players, type) {
   const starts = players.map(p => p.start).filter(Boolean).sort();
   const first = starts[0] ? new Date(starts[0]) : null;
   const day = first ? first.toLocaleString('en-US', { weekday: 'short', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) + ' ET' : '';
-  const tag = String(g.ContestStartTimeSuffix || '').replace(/[()]/g, '').trim() || (g.DraftGroupTag === 'Featured' ? 'Main' : '');
   if (type === 'sd') {
     const p = players.find(x => x.opp) || {};
     const matchup = [p.team, p.opp].filter(Boolean).join(' vs ');
     return `${matchup || 'Showdown'}${day ? `, ${day}` : ''}`;
   }
+  const tag = String(g.ContestStartTimeSuffix || '').replace(/[()]/g, '').trim() || (g.DraftGroupTag === 'Featured' ? 'Main' : '');
   return `${tag || 'Slate'}: ${games} games${day ? `, starts ${day}` : ''}`;
+}
+
+// The api.draftkings.com player list blocks GitHub's servers, so after the first 403
+// switch to the salary CSV on www.draftkings.com (the "Export to CSV" file).
+let apiBlocked = false;
+async function draftablesFor(g, id) {
+  if (!apiBlocked) {
+    try { return (await getJSON(`https://api.draftkings.com/draftgroups/v1/draftgroups/${id}/draftables`)).draftables || []; }
+    catch (e) { if (e.status === 403) { apiBlocked = true; console.log('  DraftKings API blocked here, using the salary CSV instead'); } else throw e; }
+  }
+  const ct = g.ContestTypeId ?? g.contestTypeId;
+  const url = `https://www.draftkings.com/lineup/getavailableplayerscsv?draftGroupId=${id}${ct ? `&contestTypeId=${ct}` : ''}`;
+  return csvToDraftables(await get(url, 'text'));
 }
 
 async function fetchDraftKings() {
@@ -94,13 +159,14 @@ async function fetchDraftKings() {
   const groups = lobby.DraftGroups || lobby.draftGroups || [];
   console.log(`DraftKings: ${groups.length} draft groups in lobby`);
   const slates = [], files = {}, seenPools = new Set();
+  let failed = 0;
   for (const g of groups) {
     const id = g.DraftGroupId ?? g.draftGroupId;
     if (!id) continue;
-    let data;
-    try { data = await getJSON(`https://api.draftkings.com/draftgroups/v1/draftgroups/${id}/draftables`); }
-    catch (e) { console.warn(`  skip ${id}: ${e.message}`); continue; }
-    const parsed = parseDraftables(data.draftables || []);
+    let list;
+    try { list = await draftablesFor(g, id); }
+    catch (e) { failed++; if (failed <= 3) console.warn(`  skip ${id}: ${e.message}`); continue; }
+    const parsed = parseDraftables(list);
     if (!parsed) continue;
     const { type, players } = parsed;
     if (players.length < (type === 'sd' ? 10 : 20)) continue;
@@ -113,6 +179,7 @@ async function fetchDraftKings() {
     console.log(`  ${id}: ${slates.at(-1).label} (${players.length} players)`);
     await sleep(400);
   }
+  if (failed > 3) console.warn(`  ...and ${failed - 3} more skipped`);
   slates.sort((a, b) => a.type.localeCompare(b.type) || (b.main - a.main) || String(a.start).localeCompare(String(b.start)));
   return { slates, files };
 }
@@ -159,7 +226,7 @@ async function main() {
       for (const [f, body] of Object.entries(files)) await fs.writeFile(path.join(OUT, f), JSON.stringify(body));
       manifest.dk = { updated: new Date().toISOString(), slates };
       ok = dkDone = true;
-    } else console.log('DraftKings: no classic slates found');
+    } else console.log('DraftKings: no classic or Showdown slates found');
   } catch (e) { console.error('DraftKings failed:', e.message); }
   if (!dkDone) {
     const prev = await previous();
