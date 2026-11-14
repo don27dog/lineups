@@ -538,6 +538,7 @@ function setPlayers(players,hasAvg,slateId){
   sd.players=players;sd.lineups=[];sd.fill=null;sd.slateId=slateId||null;
   if(hasAvg&&!sd.sources.find(s=>s.id==='avg'))sd.sources.push({id:'avg',name:'Site season average',w:0,matched:0,builtin:true});
   if(AUTO.sleeper)applySleeper(true);
+  if(dffFor())applyDff(true);
   sd.sources.forEach(s=>s.matched=players.filter(p=>p.proj[s.id]!=null).length);
   return players.length;
 }
@@ -635,7 +636,7 @@ function matchRows(sd,src,rows){
 }
 
 // ----- Auto-updated data (GitHub version: data/ folder filled by the scheduled job) -----
-const AUTO={manifest:null,sleeper:null};
+const AUTO={manifest:null,sleeper:null,dff:{}};
 async function loadAuto(){
   try{
     const r=await fetch('data/manifest.json',{cache:'no-store'});if(!r.ok)return;
@@ -643,10 +644,24 @@ async function loadAuto(){
     if(AUTO.manifest.sleeper&&AUTO.manifest.sleeper.file){
       const s=await fetch('data/'+AUTO.manifest.sleeper.file,{cache:'no-store'});if(s.ok)AUTO.sleeper=await s.json();
     }
+    for(const [k,v] of Object.entries(AUTO.manifest.dff||{})){
+      try{const r2=await fetch('data/'+v.file,{cache:'no-store'});if(r2.ok)AUTO.dff[k]=await r2.json();}catch(e){}
+    }
     renderAll();
   }catch(e){/* no auto data here; CSV import still works */}
 }
 // Sleeper: full PPR for DraftKings, half PPR for FanDuel and Yahoo
+// Daily Fantasy Fuel: separate DraftKings and FanDuel projections (Yahoo uses the FanDuel ones)
+function dffFor(){return AUTO.dff[S.site==='dk'?'dk':'fd']||null;}
+function applyDff(silent){
+  const sd=site(),d=dffFor();if(!d||!sd.players.length)return null;
+  let src=sd.sources.find(s=>s.id==='dff');
+  if(!src){src={id:'dff',name:'Daily Fantasy Fuel (auto)',w:50,matched:0};sd.sources.push(src);}
+  const rows=d.players.map(p=>({name:p.name,team:normTeam(p.team||''),pos:normPos(p.pos||''),v:+p.proj}));
+  const res=matchRows(sd,src,rows);
+  if(!silent){sd.lineups=[];sd.fill=null;save();renderAll();}
+  return {matched:src.matched,miss:res.miss};
+}
 function applySleeper(silent){
   const sd=site();if(!AUTO.sleeper||!sd.players.length)return null;
   let src=sd.sources.find(s=>s.id==='sleeper');
@@ -677,13 +692,17 @@ function renderAuto(){
   if(S.site==='dk'&&c.type!=='tier'){
     const sl=((m.dk&&m.dk.slates)||[]).filter(s=>(s.type||'classic')===c.type);
     html+=sl.length?`<label class="f">${esc(c.label)} slate<select id="dk-slate">${sl.map(s=>`<option value="${esc(s.id)}" ${sd.slateId===s.id?'selected':''}>${esc(s.label)}</option>`).join('')}</select></label>
-      <div class="row" style="margin-top:10px"><button class="btn primary" id="dk-load">Load slate${AUTO.sleeper?' + projections':''}</button></div>`
+      <div class="row" style="margin-top:10px"><button class="btn primary" id="dk-load">Load slate${AUTO.sleeper||dffFor()?' + projections':''}</button></div>`
       :`<p class="msg">No ${esc(c.label)} slates in the data yet. Salaries usually post early in the week.</p>`;
   }else{
-    html+=`<p class="hint">${esc(c.label)} players can’t be pulled automatically. Import the player CSV from the contest below${AUTO.sleeper?' and Sleeper projections are added for you':''}.</p>`;
+    html+=`<p class="hint">${esc(c.label)} players can’t be pulled automatically. Import the player CSV from the contest below${AUTO.sleeper||dffFor()?` and ${[AUTO.sleeper?'Sleeper':'',dffFor()?'Daily Fantasy Fuel':''].filter(Boolean).join(' and ')} projections are added for you`:''}.</p>`;
   }
   if(AUTO.sleeper){
     html+=`<div class="row" style="margin-top:10px"><button class="btn" id="sl-pull" ${sd.players.length?'':'disabled'}>Refresh Sleeper projections</button><span class="capline">Week ${esc(AUTO.sleeper.week)}, ${S.site==='dk'?'full':'half'} PPR</span></div>`;
+  }
+  if(dffFor()){
+    const d=dffFor();
+    html+=`<div class="row" style="margin-top:8px"><button class="btn" id="dff-pull" ${sd.players.length?'':'disabled'}>Refresh Daily Fantasy Fuel</button><span class="capline">${S.site==='dk'?'DraftKings':'FanDuel'} scoring${d.slate?`, ${esc(d.slate)}`:''}</span></div>`;
   }
   html+='<div id="auto-msg"></div>';
   el.innerHTML=html;
@@ -1050,6 +1069,7 @@ document.addEventListener('click',e=>{
   if(t.id==='mine-remove'){const sd=site();sd.sources=sd.sources.filter(s=>s.id!=='mine');sd.players.forEach(p=>delete p.proj.mine);sd.fill=null;sd.lineups=[];save();renderAll();return;}
   if(t.id==='fill'){fillLineup();return;}
   if(t.id==='dk-load'){const id=$('#dk-slate').value;t.disabled=true;loadDkSlate(id).then(n=>{S.tab='players';renderAll();}).catch(er=>{$('#auto-msg').innerHTML=`<p class="msg err">${esc(er.message)}</p>`;t.disabled=false;});return;}
+  if(t.id==='dff-pull'){const r=applyDff(false);if(r)$('#auto-msg').innerHTML=`<p class="msg">Daily Fantasy Fuel matched ${r.matched} players.</p>`;return;}
   if(t.id==='sl-pull'){const r=applySleeper(false);if(r)$('#auto-msg').innerHTML=`<p class="msg">Sleeper matched ${r.matched} players.</p>`;return;}
   if(t.id==='copycsv'){const ta=$('#csvout');ta.select();let ok=false;try{ok=document.execCommand('copy');}catch(_){}
     if(navigator.clipboard)navigator.clipboard.writeText(ta.value).then(()=>$('#copymsg').textContent='Copied.',()=>{$('#copymsg').textContent=ok?'Copied.':'Text selected. Copy it manually.';});else $('#copymsg').textContent=ok?'Copied.':'Text selected. Copy it manually.';return;}
