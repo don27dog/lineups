@@ -134,6 +134,9 @@ tr.tierhead small{font:500 12.5px var(--body);color:var(--muted);margin-left:6px
 .mine-opts .meta{font-size:13px;color:var(--muted);margin:0 0 8px}
 label.radio{display:flex;gap:8px;align-items:flex-start;font-size:14px;margin:6px 0;cursor:pointer}
 label.radio input{accent-color:var(--accent);margin-top:3px}
+.exportbar{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:flex-end;justify-content:space-between}
+.exportbar .hint{margin:0}
+.exportbar .dl-note{flex-basis:100%;font-size:13px}
 .lucard{padding:0;overflow:hidden;border-color:color-mix(in srgb,var(--accent) 45%,var(--line))}
 .lucard summary{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;padding:12px 16px;cursor:pointer;list-style:none;border-bottom:3px solid var(--accent)}
 .lucard summary::-webkit-details-marker{display:none}
@@ -809,6 +812,28 @@ const slotSal=s=>s.p?(s.cpt?cptSalOf(s.p):s.p.sal):0;
 const slotPts=(s,sd)=>s.p?(blend(s.p,sd.sources)||0)*(s.cpt?1.5:1):0;
 
 // ----- Render: lineups -----
+const EXPORT={upload:'',readable:''};
+let DL=null;
+try{if(window.claude&&typeof window.claude.use==='function')window.claude.use('downloads').then(ns=>{DL=ns||null;}).catch(()=>{});}catch(e){}
+const csvCell=v=>{v=String(v??'');return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v;};
+function readableCSV(all,header,sd){
+  const c=cfg(),T=c.type;
+  const head=['Lineup','Projected points',...(T==='tier'?[]:['Salary']),...header.map(h=>h==='FLEX'?'FLEX':h)];
+  const used={};const cols=head.map(h=>{used[h]=(used[h]||0)+1;return used[h]>1||header.filter(x=>x===h).length>1?`${h} ${used[h]}`:h;});
+  const rows=all.map((sl,i)=>{
+    const pts=sl.reduce((s,x)=>s+slotPts(x,sd),0),sal=sl.reduce((s,x)=>s+slotSal(x),0);
+    return [i+1,pts.toFixed(2),...(T==='tier'?[]:[sal]),...sl.map(s=>s.p?`${s.p.name} (${s.p.team} ${posLabel(s.p.pos)}, ${T==='tier'?'':c.money(slotSal(s))+', '}${fmt1(slotPts(s,sd))} pts)`:'')];
+  });
+  return [cols,...rows].map(r=>r.map(csvCell).join(',')).join('\r\n');
+}
+function downloadCSV(text,name,bom){
+  try{
+    const blob=new Blob([(bom?'\uFEFF':'')+text],{type:'text/csv;charset=utf-8'});
+    const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;
+    document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},1000);
+    return true;
+  }catch(e){return false;}
+}
 function renderResults(){
   const sd=site(),c=cfg(),T=c.type,el=$('#results');
   const lus=sd.lineups||[];
@@ -820,7 +845,11 @@ function renderResults(){
   const all=lus.map(l=>lineupSlots(l,byId,sd));
   const header=T==='sd'?[c.capt,'FLEX','FLEX','FLEX','FLEX','FLEX']:T==='tier'?tiersOf(sd):['QB','RB','RB','WR','WR','WR','TE','FLEX',c.def];
   const csv=[header.join(',')].concat(all.map(sl=>sl.map(s=>s.p?(s.cpt&&s.p.cptId?s.p.cptId:s.p.id):'').join(','))).join('\n');
-  el.innerHTML=`<div class="card"><h2>Exposure</h2><p class="hint">Share of your ${lus.length} lineups each player is in${T==='sd'?`, with how often he’s ${c.capt}`:''}.</p><div class="exp">${exp.map(([id,n])=>{const p=byId.get(id);if(!p)return'';const pct=Math.round(n/lus.length*100);const cp=cptCounts[id]?Math.round(cptCounts[id]/lus.length*100):0;return `<div><span>${esc(p.name)} <small class="pmeta">${T==='tier'?esc(p.tier):posLabel(p.pos)}${cp?`, ${c.capt} ${cp}%`:''}</small></span><b style="text-align:right">${pct}%</b><span class="bar"><i style="width:${pct}%"></i></span></div>`;}).join('')}</div></div>
+  EXPORT.upload=csv;EXPORT.readable=readableCSV(all,header,sd);
+  el.innerHTML=`<div class="card exportbar"><div><h2>Export lineups</h2><p class="hint">Save all ${lus.length} lineups as a CSV file.</p></div>
+    <div class="row"><button class="btn primary" data-dl="upload">Download for ${esc(c.name)} upload</button><button class="btn" data-dl="readable">Download with names</button></div>
+    <p class="hint dl-note">The upload file uses player IDs in ${esc(c.label)}’s column order. The names file lists each lineup’s players, projected points and salary, and opens in Excel or Google Sheets.</p><span class="capline" id="dlmsg"></span></div>
+  <div class="card"><h2>Exposure</h2><p class="hint">Share of your ${lus.length} lineups each player is in${T==='sd'?`, with how often he’s ${c.capt}`:''}.</p><div class="exp">${exp.map(([id,n])=>{const p=byId.get(id);if(!p)return'';const pct=Math.round(n/lus.length*100);const cp=cptCounts[id]?Math.round(cptCounts[id]/lus.length*100):0;return `<div><span>${esc(p.name)} <small class="pmeta">${T==='tier'?esc(p.tier):posLabel(p.pos)}${cp?`, ${c.capt} ${cp}%`:''}</small></span><b style="text-align:right">${pct}%</b><span class="bar"><i style="width:${pct}%"></i></span></div>`;}).join('')}</div></div>
   <div class="lineups">${all.map((sl,i)=>{const sal=sl.reduce((s,x)=>s+slotSal(x),0),pts=sl.reduce((s,x)=>s+slotPts(x,sd),0);
     return `<article class="lu"><header><b>Lineup ${i+1}</b><span>${fmt1(pts)} pts${T==='tier'?'':', '+c.money(sal)}</span></header><ol>${sl.map(s=>s.p?`<li class="${s.cpt?'stk':''}"><span class="slot">${esc(s.lab)}</span><span class="nm">${esc(s.p.name)} <small>${esc(s.p.team)}</small>${s.p.lock?' 🔒':''}</span><span class="sal">${T==='tier'?'':c.money(slotSal(s))}</span><span>${fmt1(slotPts(s,sd))}</span></li>`:'').join('')}</ol></article>`;}).join('')}</div>
   <div class="card" style="margin-top:14px"><h2>Upload file</h2><p class="hint">Laid out in ${esc(c.label)}’s bulk-upload column order using the player IDs from your player file${T==='sd'&&S.site==='dk'?' (Captain IDs are the CPT versions)':''}. Copy it into a .csv and upload it on ${esc(c.name)}’s lineup upload page.${T!=='classic'?' If the site’s template header differs, keep its header and paste these rows under it.':''}</p>
@@ -1071,6 +1100,19 @@ document.addEventListener('click',e=>{
   if(t.id==='dk-load'){const id=$('#dk-slate').value;t.disabled=true;loadDkSlate(id).then(n=>{S.tab='players';renderAll();}).catch(er=>{$('#auto-msg').innerHTML=`<p class="msg err">${esc(er.message)}</p>`;t.disabled=false;});return;}
   if(t.id==='dff-pull'){const r=applyDff(false);if(r)$('#auto-msg').innerHTML=`<p class="msg">Daily Fantasy Fuel matched ${r.matched} players.</p>`;return;}
   if(t.id==='sl-pull'){const r=applySleeper(false);if(r)$('#auto-msg').innerHTML=`<p class="msg">Sleeper matched ${r.matched} players.</p>`;return;}
+  if(t.dataset.dl){
+    const d=new Date(),day=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    const kind=t.dataset.dl,name=`${S.site}-${mode()}-lineups${kind==='readable'?'-names':''}-${day}.csv`;
+    const text=kind==='readable'?EXPORT.readable:EXPORT.upload,bom=kind==='readable',msg=$('#dlmsg');
+    // Inside claude.ai the viewer saves through the platform; on GitHub a normal browser download.
+    if(DL){
+      DL.save({filename:name,data:(bom?'\uFEFF':'')+text}).then(r=>{msg.textContent=r.status==='saved'?`Saved ${name}.`:'';})
+        .catch(e=>{msg.textContent=e&&e.code==='declined'?'Download cancelled.':e&&e.code==='rate_limited'?'A save is already open. Finish it, then try again.':'Downloads aren’t available here. Use Copy CSV below instead.';});
+    }else{
+      const ok=downloadCSV(text,name,bom);
+      msg.textContent=ok?`Saved ${name} to your downloads.`:'Your browser blocked the download. Use Copy CSV below instead.';
+    }
+    return;}
   if(t.id==='copycsv'){const ta=$('#csvout');ta.select();let ok=false;try{ok=document.execCommand('copy');}catch(_){}
     if(navigator.clipboard)navigator.clipboard.writeText(ta.value).then(()=>$('#copymsg').textContent='Copied.',()=>{$('#copymsg').textContent=ok?'Copied.':'Text selected. Copy it manually.';});else $('#copymsg').textContent=ok?'Copied.':'Text selected. Copy it manually.';return;}
 });
