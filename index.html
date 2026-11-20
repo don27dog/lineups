@@ -137,6 +137,16 @@ label.radio input{accent-color:var(--accent);margin-top:3px}
 .exportbar{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:flex-end;justify-content:space-between}
 .exportbar .hint{margin:0}
 .exportbar .dl-note{flex-basis:100%;font-size:13px}
+.contest{margin:8px 0 14px}
+.contest button{font-size:14px;padding:7px 14px}
+#tour-opts{border-left:3px solid var(--accent);padding:2px 0 2px 14px;margin:0 0 14px}
+.tour-checks label.radio{margin:4px 0}
+td.own.chalk input{border-color:var(--warn);color:var(--warn);font-weight:600}
+td.own.lowown input{border-color:var(--good);color:var(--good);font-weight:600}
+.lu header .own{display:block;font-size:12px}
+.otag{display:inline-block;margin-left:8px;font-size:12px;color:var(--muted);font-weight:500}
+.otag.chalk{color:var(--warn);font-weight:600}
+.otag.lowown{color:var(--good);font-weight:600}
 .lucard{padding:0;overflow:hidden;border-color:color-mix(in srgb,var(--accent) 45%,var(--line))}
 .lucard summary{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;padding:12px 16px;cursor:pointer;list-style:none;border-bottom:3px solid var(--accent)}
 .lucard summary::-webkit-details-marker{display:none}
@@ -205,6 +215,7 @@ details summary{cursor:pointer;font-weight:600}
 <section class="panel" id="p-sources" hidden>
   <div class="card" id="auto-card" hidden></div>
   <div class="card" id="mine-card"></div>
+  <div class="card" id="own-card"></div>
   <div class="two">
     <div class="card">
       <h2>Slate</h2>
@@ -234,12 +245,29 @@ details summary{cursor:pointer;font-weight:600}
 <section class="panel" id="p-build" hidden>
   <div class="card">
     <h2>Build settings</h2>
+    <div class="chips contest" id="contest-chips" role="group" aria-label="Contest type"><button data-contest="cash" aria-pressed="true">Cash: highest points</button><button data-contest="tour" aria-pressed="false">Tournament</button></div>
     <div class="grid-set">
       <label class="f">Number of lineups<input type="number" id="s-n" min="1" max="150" value="10"></label>
       <label class="f">QB stack (classic)<select id="s-stack"><option value="0">No stack required</option><option value="1">QB + 1 WR/TE</option><option value="2">QB + 2 WR/TE</option></select></label>
       <label class="f">Randomness %<input type="number" id="s-rand" min="0" max="50" value="0"></label>
       <label class="f">Max exposure %<input type="number" id="s-exp" min="1" max="100" value="100"></label>
       <label class="f">Min salary used<input type="number" id="s-min" min="0" value="0"></label>
+    </div>
+    <div id="contest-box">
+      <div id="tour-opts" hidden>
+        <p class="hint">Built from patterns in past Millionaire Maker top finishers: stack your QB with two pass catchers, bring one back from the other team, stay near the salary cap, and don’t all play the same popular players.</p>
+        <div class="tour-checks" id="tour-classic">
+          <label class="radio"><input type="checkbox" id="t-bring"> Bring-back: include 1 RB, WR or TE from your QB’s opponent</label>
+          <label class="radio"><input type="checkbox" id="t-nodst"> No defense playing against your QB</label>
+          <label class="radio"><input type="checkbox" id="t-note"> No TE in the FLEX spot</label>
+        </div>
+        <div class="grid-set" style="margin-top:10px">
+          <label class="f">Max total ownership %<input type="number" id="t-maxown" min="0" max="900" step="5"></label>
+          <label class="f">Max players 20%+ owned<input type="number" id="t-chalk" min="0" max="9"></label>
+          <label class="f">Min players under 5% owned<input type="number" id="t-low" min="0" max="9"></label>
+        </div>
+        <p class="hint" id="tour-own-note"></p>
+      </div>
     </div>
     <p class="hint">Each lineup is the exact best score under your rules. Randomness nudges projections up or down per lineup for variety; duplicate lineups are never returned. Locked players appear in every lineup, and per-player max exposure on the Players tab overrides the global cap.</p>
     <div class="row"><button class="btn primary big" id="go">Build lineups</button><span id="go-status" class="capline"></span></div>
@@ -251,61 +279,52 @@ details summary{cursor:pointer;font-weight:600}
 </div>
 <script>
 // ===== Optimizer core =====
+// Exact classic solver: knapsack DP over salary with roster-shape state.
+// State: RB/WR/TE/DST counts, QB-stack count (k), bring-back flag (b).
 const MAPS_CACHE = {};
-function subIdx(r,w,t,d,k,K){return ((((r*5+w)*3+t)*2+d)*K+k);}
-function getMaps(K){
-  if(MAPS_CACHE[K]) return MAPS_CACHE[K];
-  const SUB=120*K, maps={}, finals=[];
-  for(const key of ['RB','WR','TE','DST','WRs','TEs']){
-    const stack=key.endsWith('s'), base=stack?key.slice(0,-1):key;
+function subIdx(r,w,t,d,k,K,b,B){return (((((r*5+w)*3+t)*2+d)*K+k)*B+b);}
+function getMaps(K,B,maxT){
+  const ck=K+'|'+B+'|'+maxT;
+  if(MAPS_CACHE[ck]) return MAPS_CACHE[ck];
+  const SUB=120*K*B, maps={}, finals=[];
+  for(const base of ['RB','WR','TE','DST'])for(const suf of ['','s','b']){
     const m=new Int32Array(SUB).fill(-1);
-    for(let r=0;r<4;r++)for(let w=0;w<5;w++)for(let t=0;t<3;t++)for(let d=0;d<2;d++)for(let k=0;k<K;k++){
-      let R=r,W=w,T=t,D=d,KK=k;
+    for(let r=0;r<4;r++)for(let w=0;w<5;w++)for(let t=0;t<3;t++)for(let d=0;d<2;d++)for(let k=0;k<K;k++)for(let b=0;b<B;b++){
+      let R=r,W=w,T=t,D=d,KK=k,BB=b;
       if(base==='RB')R++;else if(base==='WR')W++;else if(base==='TE')T++;else D++;
-      if(stack)KK=Math.min(K-1,k+1);
-      if(R>3||W>4||T>2||D>1)continue;
+      if(suf==='s')KK=Math.min(K-1,k+1);
+      if(suf==='b')BB=Math.min(B-1,b+1);
+      if(R>3||W>4||T>maxT||D>1)continue;
       if((R>2)+(W>3)+(T>1)>1)continue;
-      m[subIdx(r,w,t,d,k,K)]=subIdx(R,W,T,D,KK,K);
+      m[subIdx(r,w,t,d,k,K,b,B)]=subIdx(R,W,T,D,KK,K,BB,B);
     }
-    maps[key]=m;
+    maps[base+suf]=m;
   }
-  for(let r=2;r<4;r++)for(let w=3;w<5;w++)for(let t=1;t<3;t++){
+  for(let r=2;r<4;r++)for(let w=3;w<5;w++)for(let t=1;t<=maxT;t++){
     if(r+w+t!==7)continue;
-    finals.push(subIdx(r,w,t,1,K-1,K));
+    finals.push(subIdx(r,w,t,1,K-1,K,B-1,B));
   }
   maps.finals=finals; maps.SUB=SUB;
-  MAPS_CACHE[K]=maps; return maps;
+  MAPS_CACHE[ck]=maps; return maps;
 }
-function dpSolve(items,Cr,minU,K){
-  const maps=getMaps(K), SUB=maps.SUB, size=(Cr+1)*SUB, n=items.length;
+function dpSolve(items,Cr,minU,maps){
+  const SUB=maps.SUB, size=(Cr+1)*SUB, n=items.length;
   let dp=new Float64Array(size).fill(-Infinity); dp[0]=0;
   const ch=new Uint16Array(n*size);
   for(let i=0;i<n;i++){
     const it=items[i], c=it.c, v=it.v, m=maps[it.mk], off=i*size;
     if(c>Cr){ if(it.lock) return null; continue; }
-    if(it.lock){
-      const nd=new Float64Array(size).fill(-Infinity);
-      for(let s=Cr-c;s>=0;s--){
-        const b=s*SUB, tb=(s+c)*SUB;
-        for(let q=0;q<SUB;q++){
-          const val=dp[b+q]; if(val===-Infinity)continue;
-          const tq=m[q]; if(tq<0)continue;
-          const ti=tb+tq, nv=val+v;
-          if(nv>nd[ti]){nd[ti]=nv;ch[off+ti]=q+1;}
-        }
-      }
-      dp=nd;
-    } else {
-      for(let s=Cr-c;s>=0;s--){
-        const b=s*SUB, tb=(s+c)*SUB;
-        for(let q=0;q<SUB;q++){
-          const val=dp[b+q]; if(val===-Infinity)continue;
-          const tq=m[q]; if(tq<0)continue;
-          const ti=tb+tq, nv=val+v;
-          if(nv>dp[ti]){dp[ti]=nv;ch[off+ti]=q+1;}
-        }
+    const tgt=it.lock?new Float64Array(size).fill(-Infinity):dp;
+    for(let s=Cr-c;s>=0;s--){
+      const b=s*SUB, tb=(s+c)*SUB;
+      for(let q=0;q<SUB;q++){
+        const val=dp[b+q]; if(val===-Infinity)continue;
+        const tq=m[q]; if(tq<0)continue;
+        const ti=tb+tq, nv=val+v;
+        if(nv>tgt[ti]){tgt[ti]=nv;ch[off+ti]=q+1;}
       }
     }
+    if(it.lock)dp=tgt;
   }
   let best=-Infinity, bi=-1;
   for(let s=Math.max(0,minU);s<=Cr;s++){
@@ -319,10 +338,11 @@ function dpSolve(items,Cr,minU,K){
   }
   return {val:best,picks};
 }
+// Drop players that enough cheaper-and-better players at the same position make unnecessary.
 function pruneItems(items){
   const lim={RB:3,WR:4,TE:2,DST:1};
   return items.filter(p=>{
-    if(p.lock||p.mk.endsWith('s'))return true;
+    if(p.lock||p.mk.length>p.pos.length)return true;
     let cnt=0;
     for(const q of items){
       if(q===p||q.pos!==p.pos)continue;
@@ -331,9 +351,11 @@ function pruneItems(items){
     return true;
   });
 }
-// players: [{idx,pos,team,c,v,lock}]  cfg: {capU,minU,stack,qbLimit}
+// players: [{idx,pos,team,opp,c,v,lock}]
+// cfg: {capU,minU,stack,qbLimit,bring,noTeFlex,noDstVsQb,fast}
 function solveLineup(players,cfg){
-  const K=cfg.stack+1;
+  const K=(+cfg.stack||0)+1, B=cfg.bring?2:1, maxT=cfg.noTeFlex?1:2;
+  const maps=getMaps(K,B,maxT);
   const qbs=players.filter(p=>p.pos==='QB');
   const lockedQB=qbs.filter(p=>p.lock);
   let cands;
@@ -344,13 +366,24 @@ function solveLineup(players,cfg){
     const extra=qbs.filter(q=>lockedTeams.has(q.team));
     cands=[...new Set([...byV,...extra])];
   }
+  if(B>1)cands=cands.filter(q=>q.opp);
   const others=players.filter(p=>p.pos!=='QB');
   let best=null;
   for(const qb of cands){
     const Cr=cfg.capU-qb.c; if(Cr<0)continue;
-    let items=others.map(p=>Object.assign({},p,{mk:p.pos+((K>1&&(p.pos==='WR'||p.pos==='TE')&&p.team===qb.team)?'s':'')}));
-    if(!cfg.minU) items=pruneItems(items);
-    const r=dpSolve(items,Cr,cfg.minU-qb.c,K);
+    let items=others.filter(p=>p.lock||!(cfg.noDstVsQb&&p.pos==='DST'&&p.team===qb.opp)).map(p=>{
+      const stk=K>1&&(p.pos==='WR'||p.pos==='TE')&&p.team===qb.team;
+      const brg=!stk&&B>1&&qb.opp&&(p.pos==='RB'||p.pos==='WR'||p.pos==='TE')&&p.team===qb.opp;
+      return Object.assign({},p,{mk:p.pos+(stk?'s':brg?'b':'')});
+    });
+    if(!cfg.minU||cfg.fast) items=pruneItems(items);
+    let r=dpSolve(items,Cr,cfg.minU-qb.c,maps);
+    if(!r&&cfg.minU&&cfg.fast){ // pruning can rule out reaching the salary floor; retry in full
+      r=dpSolve(others.filter(p=>p.lock||!(cfg.noDstVsQb&&p.pos==='DST'&&p.team===qb.opp)).map(p=>{
+        const stk=K>1&&(p.pos==='WR'||p.pos==='TE')&&p.team===qb.team;
+        const brg=!stk&&B>1&&qb.opp&&(p.pos==='RB'||p.pos==='WR'||p.pos==='TE')&&p.team===qb.opp;
+        return Object.assign({},p,{mk:p.pos+(stk?'s':brg?'b':'')});}),Cr,cfg.minU-qb.c,maps);
+    }
     if(r&&(!best||r.val+qb.v>best.val)) best={val:r.val+qb.v,picks:[qb,...r.picks]};
   }
   return best;
@@ -537,7 +570,7 @@ function setPlayers(players,hasAvg,slateId){
   const sd=site();
   // keep projections, locks and overrides from the previous pool where names match
   const old=new Map(sd.players.map(p=>[normName(p.name)+'|'+p.pos,p]));
-  for(const p of players){const o=old.get(normName(p.name)+'|'+p.pos);if(o){Object.assign(p.proj,o.proj,p.proj.avg!=null?{avg:p.proj.avg}:{});p.lock=o.lock;p.cpt=!!o.cpt;p.out=o.out;p.ovr=o.ovr;p.exp=o.exp;}}
+  for(const p of players){const o=old.get(normName(p.name)+'|'+p.pos);if(o){Object.assign(p.proj,o.proj,p.proj.avg!=null?{avg:p.proj.avg}:{});p.lock=o.lock;p.cpt=!!o.cpt;p.out=o.out;p.ovr=o.ovr;p.exp=o.exp;if(o.own!=null)p.own=o.own;}}
   sd.players=players;sd.lineups=[];sd.fill=null;sd.slateId=slateId||null;
   if(hasAvg&&!sd.sources.find(s=>s.id==='avg'))sd.sources.push({id:'avg',name:'Site season average',w:0,matched:0,builtin:true});
   if(AUTO.sleeper)applySleeper(true);
@@ -580,6 +613,39 @@ function importMine(text){
   sd.lineups=[];sd.fill=null;save();renderAll();
   return {matched:src.matched,miss:res.miss,col:d.head[d.projI]};
 }
+// ----- Projected ownership -----
+function importOwn(text){
+  const sd=site();if(!sd.players.length)throw new Error('Load the slate first, so ownership has players to match.');
+  const t=tableFrom(text,['name','player','player name','nickname','full_name','full name']);const H=t.head;
+  const lower=H.map(x=>x.toLowerCase());
+  let nameI=col(H,'name','player','player name','playername','nickname','full_name','full name');
+  const fI=col(H,'first_name','first name'),lI=col(H,'last_name','last name');
+  if(nameI<0&&fI>=0&&lI>=0){H.push('Full name');t.rows.forEach(r=>r.push(`${r[fI]||''} ${r[lI]||''}`.trim()));nameI=H.length-1;}
+  let ownI=lower.findIndex(x=>/(^|[^a-z])(proj(ected)?[ _]?own|pown|own(ership)?)([^a-z]|$)|own%|%own/.test(x));
+  if(ownI<0)ownI=lower.findIndex(x=>x.includes('own'));
+  if(nameI<0||ownI<0)throw new Error('Couldn’t find a player name column and an ownership column. Name them “Name” and “Ownership”.');
+  const teamI=col(H,'team','tm','teamabbrev'),posI=col(H,'pos','position');
+  let rows=t.rows.map(r=>({name:r[nameI],v:parseFloat(String(r[ownI]).replace(/[^0-9.\-]/g,'')),team:teamI>=0?normTeam(r[teamI]):'',pos:posI>=0?normPos(r[posI]):''})).filter(r=>r.name&&!isNaN(r.v));
+  if(!rows.length)throw new Error('No ownership numbers found in that file.');
+  if(rows.every(r=>r.v<=1))rows.forEach(r=>r.v*=100); // 0.12 means 12%
+  const tmp={id:'__own',matched:0};
+  const res=matchRows(sd,tmp,rows);
+  sd.players.forEach(p=>{if(p.proj.__own!=null){p.own=+p.proj.__own.toFixed(1);delete p.proj.__own;}else p.own=null;});
+  sd.ownFile=new Date().toLocaleString([], {weekday:'short',hour:'numeric',minute:'2-digit'});
+  sd.fill=null;save();renderAll();
+  return {matched:tmp.matched,miss:res.miss,col:H[ownI]};
+}
+function renderOwn(){
+  const el=$('#own-card');if(!el)return;const sd=site();const n=sd.players.filter(p=>p.own!=null&&p.own!=='').length;
+  el.innerHTML=`<h2>Projected ownership</h2>
+    <p class="hint">For Tournament mode. Upload a CSV with a player name column and an ownership column (like 12.5 or 12.5%). The Lineups tab can then cap total ownership, limit popular players and require low-owned ones.</p>
+    <div class="fileline"><input type="file" id="own-file" accept=".csv,text/csv,.txt" aria-label="Ownership file"><button class="btn" id="own-paste-toggle">Paste instead</button></div>
+    <div id="own-paste" hidden><textarea id="own-text" placeholder="Name,Ownership&#10;Patrick Mahomes,14.2"></textarea><div class="row" style="margin-top:8px"><button class="btn primary" id="own-import">Import ownership</button></div></div>
+    ${n?`<p class="meta" style="font-size:13px;color:var(--muted);margin:10px 0 0">${n} of ${sd.players.length} players have ownership${sd.ownFile?`, uploaded ${esc(sd.ownFile)}`:''}. <button class="btn ghost" id="own-clear" style="padding:2px 8px">Clear ownership</button></p>`:''}
+    <div id="own-msg"></div>`;
+  $('#own-file').addEventListener('change',e=>readFile(e.target,doOwn));
+}
+function doOwn(text){try{const r=importOwn(text);$('#own-msg').innerHTML=`<p class="msg">Imported ownership from the “${esc(r.col)}” column: ${r.matched} players matched.${r.miss.length?` Not matched (${r.miss.length}): ${esc(r.miss.slice(0,12).join(', '))}${r.miss.length>12?'…':''}`:''}</p>`;}catch(er){$('#own-msg').innerHTML=`<p class="msg err">${esc(er.message)}</p>`;}}
 function renderMine(){
   const el=$('#mine-card');if(!el)return;const sd=site();const m=sd.sources.find(s=>s.id==='mine');
   el.innerHTML=`<h2>Your projections</h2>
@@ -739,7 +805,7 @@ function renderPlayers(){
   list=list.filter(({p})=>(fpos==='ALL'||p.pos===fpos||(fpos==='FLEX'&&['RB','WR','TE'].includes(p.pos))||(fpos.startsWith('tier:')&&p.tier===fpos.slice(5)))&&(!q||normName(p.name+' '+p.team).includes(q))&&(f.only!=='lock'||p.lock)&&(f.only!=='out'||p.out));
   let k=S.sort.k;const d=S.sort.d;
   if(T==='tier'&&(k==='sal'||k==='val'||k==='csal'))k='proj';
-  const key=({p,b})=>k==='name'?p.name:k==='sal'?p.sal:k==='csal'?cptSalOf(p):k==='val'?(b==null?-1:b/p.sal):k==='proj'?(b??-1):k.startsWith('src:')?(p.proj[k.slice(4)]??-1):0;
+  const key=({p,b})=>k==='name'?p.name:k==='sal'?p.sal:k==='csal'?cptSalOf(p):k==='val'?(b==null?-1:b/p.sal):k==='proj'?(b??-1):k==='own'?(p.own??-1):k.startsWith('src:')?(p.proj[k.slice(4)]??-1):0;
   list.sort((a,b)=>{if(T==='tier'){const t=tierNum(a.p.tier)-tierNum(b.p.tier);if(t)return t;}const x=key(a),y=key(b);return (x<y?-1:x>y?1:0)*d;});
   const locked=sd.players.filter(p=>p.lock),valDen=c.unit===1?1:1000;
   const lockSal=locked.reduce((s,p)=>s+(T==='sd'&&p.cpt?cptSalOf(p):p.sal),0);
@@ -757,19 +823,21 @@ function renderPlayers(){
     :T==='sd'
     ?`<th class="l">Lock / ${c.capt} / out</th>${th('name','Player','l name')}${th('sal','Salary')}${th('csal',c.capt+' salary')}${th('proj','Proj')}<th>${c.capt} proj</th>${th('val',c.unit===1?'Value (pts/$)':'Value (pts/$1K)')}`
     :`<th class="l">Lock / out</th>${th('name','Player','l name')}${th('sal','Salary')}${th('proj','Proj')}${th('val',c.unit===1?'Value (pts/$)':'Value (pts/$1K)')}`;
-  const ncols=(T==='tier'?3:T==='sd'?7:5)+srcs.length+2;
+  const showOwn=T!=='tier'&&(hasOwn(sd)||tourOn());
+  const ncols=(T==='tier'?3:T==='sd'?7:5)+srcs.length+2+(showOwn?1:0);
   let lastTier=null;
   const rows=list.slice(0,400).map(({p,b})=>{
     let pre='';
     if(T==='tier'&&p.tier!==lastTier){lastTier=p.tier;const n=sd.players.filter(x=>x.tier===p.tier).length;pre=`<tr class="tierhead"><td class="l" colspan="${ncols}"><span>Tier ${tierNum(p.tier)}</span> <small>${n} players${sd.players.some(x=>x.tier===p.tier&&x.lock)?', picked':''}</small></td></tr>`;}
     const v=b==null||!p.sal?null:b/p.sal*valDen;
     const acts=`<div class="acts"><button class="ic lock" data-act="lock" aria-pressed="${p.lock}" aria-label="${T==='tier'?'Pick':'Lock'} ${esc(p.name)}" title="${T==='tier'?'Pick for this tier':'Lock in every lineup'}">${ICON_LOCK}</button>${T==='sd'?`<button class="ic cpt" data-act="cpt" aria-pressed="${!!p.cpt}" aria-label="Make ${esc(p.name)} ${c.capt}" title="Lock as ${c.capt}">${c.capt[0]}</button>`:''}<button class="ic ban" data-act="out" aria-pressed="${p.out}" aria-label="Exclude ${esc(p.name)}" title="Exclude">${ICON_BAN}</button></div>`;
-    const meta=`${esc(p.team)}${p.opp?' vs '+esc(p.opp):''}${T!=='tier'&&v!=null?`<span class="vtag ${valTier(v)}">${v.toFixed(2)}${c.unit===1?'':'x'}</span>`:''}`;
+    const meta=`${esc(p.team)}${p.opp?' vs '+esc(p.opp):''}${T!=='tier'&&v!=null?`<span class="vtag ${valTier(v)}">${v.toFixed(2)}${c.unit===1?'':'x'}</span>`:''}${T!=='tier'&&p.own!=null&&p.own!==''?`<span class="otag ${isChalk(p)?'chalk':isLow(p)?'lowown':''}">${p.own}% own</span>`:''}`;
     const cells=T==='tier'?`<td class="blend">${fmt1(b)}</td>`
       :T==='sd'?`<td>${c.money(p.sal)}</td><td>${c.money(cptSalOf(p))}</td><td class="blend">${fmt1(b)}</td><td>${b==null?'–':fmt1(b*1.5)}</td><td class="val ${v==null?'':valTier(v)}">${v==null?'–':v.toFixed(2)}</td>`
       :`<td>${c.money(p.sal)}</td><td class="blend">${fmt1(b)}</td><td class="val ${v==null?'':valTier(v)}">${v==null?'–':v.toFixed(2)}</td>`;
+    const ownCell=showOwn?`<td class="own ${isChalk(p)?'chalk':isLow(p)?'lowown':''}"><input class="mini" type="number" step="0.1" min="0" max="100" data-f="own" value="${p.own??''}" placeholder="–" aria-label="Projected ownership %"></td>`:'';
     return pre+`<tr class="${p.lock?'locked':''} ${p.out?'out':''}" data-id="${esc(p.id)}"><td class="l">${acts}</td>
-      <td class="l name"><div class="pname"><span class="pos">${posLabel(p.pos)}</span>${esc(p.name)}${p.cpt?` <small class="cptmark">${c.capt}</small>`:''}</div><div class="pmeta">${meta}</div></td>${cells}
+      <td class="l name"><div class="pname"><span class="pos">${posLabel(p.pos)}</span>${esc(p.name)}${p.cpt?` <small class="cptmark">${c.capt}</small>`:''}</div><div class="pmeta">${meta}</div></td>${cells}${ownCell}
       ${srcs.map(s=>`<td class="${p.proj[s.id]==null?'na':''}">${fmt1(p.proj[s.id])}</td>`).join('')}
       <td><input class="mini" type="number" step="0.1" data-f="ovr" value="${p.ovr??''}" placeholder="–" aria-label="Override projection"></td>
       <td><input class="mini" type="number" min="0" max="100" data-f="exp" value="${p.exp??''}" placeholder="${S.settings.maxExp}" aria-label="Max exposure"></td></tr>`;}).join('');
@@ -778,7 +846,7 @@ function renderPlayers(){
     <div class="chips" id="poschips">${chips.map(x=>`<button data-pos="${x}" aria-pressed="${fpos===x}">${chipLab(x)}</button>`).join('')}</div>
     <div class="chips">${T==='tier'?'':`<button data-sortchip="val" aria-pressed="${S.sort.k==='val'}">Best value</button>`}<button data-only="lock" aria-pressed="${f.only==='lock'}">${T==='tier'?'Picked':'Locked'}</button><button data-only="out" aria-pressed="${f.only==='out'}">Excluded</button></div></div>
   <div class="statbar">${stat}${locked.length?`<span><button class="btn ghost" data-act="unlockall" style="padding:2px 8px">${T==='tier'?'Clear picks':'Clear locks'}</button></span>`:''}</div>
-  <div class="tablebox"><table><thead><tr>${head}
+  <div class="tablebox"><table><thead><tr>${head}${showOwn?th('own','Own %'):''}
   ${srcs.map(s=>th('src:'+s.id,esc(s.name)+(srcOn(s)?'':' (off)'))).join('')}<th>Override</th><th>Max %</th></tr></thead><tbody>${rows}</tbody></table>${list.length?'':'<div class="empty">No players match. Clear the search or filters.</div>'}</div>
   ${list.length>400?`<p class="hint">Showing the first 400 of ${list.length}. Search or filter to narrow it.</p>`:''}
   ${!srcs.some(s=>srcActive(s)||(s.id==='mine'&&s.on!==false&&s.override))?'<p class="msg">No projection sources are on. Tick a source above, or add one on the Projections tab.</p>':''}`;
@@ -786,7 +854,7 @@ function renderPlayers(){
 
 // ----- Render: sources -----
 function renderSources(){
-  const sd=site(),c=cfg();renderMine();
+  const sd=site(),c=cfg();renderMine();renderOwn();
   $('#slate-hint').innerHTML=sd.players.length?`${sd.players.length} ${esc(c.name)} players loaded. Importing a new file replaces the slate but keeps matched projections, locks and overrides.`:`Export the players list from your ${esc(c.name)} contest (the salary CSV) and import it here.`;
   const l=$('#src-list');
   if(!sd.sources.length){l.innerHTML='<p class="hint">No sources yet for '+esc(c.name)+'.</p>';return;}
@@ -818,11 +886,12 @@ try{if(window.claude&&typeof window.claude.use==='function')window.claude.use('d
 const csvCell=v=>{v=String(v??'');return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v;};
 function readableCSV(all,header,sd){
   const c=cfg(),T=c.type;
-  const head=['Lineup','Projected points',...(T==='tier'?[]:['Salary']),...header.map(h=>h==='FLEX'?'FLEX':h)];
+  const withOwn=T!=='tier'&&hasOwn(sd);
+  const head=['Lineup','Projected points',...(T==='tier'?[]:['Salary']),...(withOwn?['Total ownership %']:[]),...header.map(h=>h==='FLEX'?'FLEX':h)];
   const used={};const cols=head.map(h=>{used[h]=(used[h]||0)+1;return used[h]>1||header.filter(x=>x===h).length>1?`${h} ${used[h]}`:h;});
   const rows=all.map((sl,i)=>{
     const pts=sl.reduce((s,x)=>s+slotPts(x,sd),0),sal=sl.reduce((s,x)=>s+slotSal(x),0);
-    return [i+1,pts.toFixed(2),...(T==='tier'?[]:[sal]),...sl.map(s=>s.p?`${s.p.name} (${s.p.team} ${posLabel(s.p.pos)}, ${T==='tier'?'':c.money(slotSal(s))+', '}${fmt1(slotPts(s,sd))} pts)`:'')];
+    return [i+1,pts.toFixed(2),...(T==='tier'?[]:[sal]),...(withOwn?[ownStats(sl.filter(x=>x.p).map(x=>x.p)).sum.toFixed(1)]:[]),...sl.map(s=>s.p?`${s.p.name} (${s.p.team} ${posLabel(s.p.pos)}, ${T==='tier'?'':c.money(slotSal(s))+', '}${fmt1(slotPts(s,sd))} pts)`:'')];
   });
   return [cols,...rows].map(r=>r.map(csvCell).join(',')).join('\r\n');
 }
@@ -851,7 +920,8 @@ function renderResults(){
     <p class="hint dl-note">The upload file uses player IDs in ${esc(c.label)}’s column order. The names file lists each lineup’s players, projected points and salary, and opens in Excel or Google Sheets.</p><span class="capline" id="dlmsg"></span></div>
   <div class="card"><h2>Exposure</h2><p class="hint">Share of your ${lus.length} lineups each player is in${T==='sd'?`, with how often he’s ${c.capt}`:''}.</p><div class="exp">${exp.map(([id,n])=>{const p=byId.get(id);if(!p)return'';const pct=Math.round(n/lus.length*100);const cp=cptCounts[id]?Math.round(cptCounts[id]/lus.length*100):0;return `<div><span>${esc(p.name)} <small class="pmeta">${T==='tier'?esc(p.tier):posLabel(p.pos)}${cp?`, ${c.capt} ${cp}%`:''}</small></span><b style="text-align:right">${pct}%</b><span class="bar"><i style="width:${pct}%"></i></span></div>`;}).join('')}</div></div>
   <div class="lineups">${all.map((sl,i)=>{const sal=sl.reduce((s,x)=>s+slotSal(x),0),pts=sl.reduce((s,x)=>s+slotPts(x,sd),0);
-    return `<article class="lu"><header><b>Lineup ${i+1}</b><span>${fmt1(pts)} pts${T==='tier'?'':', '+c.money(sal)}</span></header><ol>${sl.map(s=>s.p?`<li class="${s.cpt?'stk':''}"><span class="slot">${esc(s.lab)}</span><span class="nm">${esc(s.p.name)} <small>${esc(s.p.team)}</small>${s.p.lock?' 🔒':''}</span><span class="sal">${T==='tier'?'':c.money(slotSal(s))}</span><span>${fmt1(slotPts(s,sd))}</span></li>`:'').join('')}</ol></article>`;}).join('')}</div>
+    const own=T!=='tier'&&hasOwn(sd)?ownStats(sl.filter(x=>x.p).map(x=>x.p)):null;
+    return `<article class="lu"><header><b>Lineup ${i+1}</b><span>${fmt1(pts)} pts${T==='tier'?'':', '+c.money(sal)}${own?`<span class="own">${Math.round(own.sum)}% own, ${own.chalk} at 20%+, ${own.low} under 5%</span>`:''}</span></header><ol>${sl.map(s=>s.p?`<li class="${s.cpt?'stk':''}"><span class="slot">${esc(s.lab)}</span><span class="nm">${esc(s.p.name)} <small>${esc(s.p.team)}</small>${s.p.lock?' 🔒':''}</span><span class="sal">${T==='tier'?'':c.money(slotSal(s))}</span><span>${fmt1(slotPts(s,sd))}</span></li>`:'').join('')}</ol></article>`;}).join('')}</div>
   <div class="card" style="margin-top:14px"><h2>Upload file</h2><p class="hint">Laid out in ${esc(c.label)}’s bulk-upload column order using the player IDs from your player file${T==='sd'&&S.site==='dk'?' (Captain IDs are the CPT versions)':''}. Copy it into a .csv and upload it on ${esc(c.name)}’s lineup upload page.${T!=='classic'?' If the site’s template header differs, keep its header and paste these rows under it.':''}</p>
   <textarea id="csvout" readonly>${esc(csv)}</textarea><div class="row" style="margin-top:8px"><button class="btn primary" id="copycsv">Copy CSV</button><span class="capline" id="copymsg"></span></div></div>`;
 }
@@ -870,7 +940,16 @@ function renderAll(){
   $('#cnt-sources').textContent=sd.sources.filter(srcActive).length?`(${sd.sources.filter(srcActive).length})`:'';
   const st=S.settings;$('#s-n').value=st.n;$('#s-stack').value=st.stack;$('#s-rand').value=st.rand;$('#s-exp').value=st.maxExp;
   $('#s-min').value=st.minSal&&st.minSal[dkey()]?st.minSal[dkey()]:'';$('#s-min').placeholder='None';
-  $('#s-stack').closest('label').hidden=T!=='classic';$('#s-min').closest('label').hidden=T==='tier';
+  $('#s-stack').closest('label').hidden=T!=='classic';
+  const tr=tour(),on=tourOn();
+  $('#contest-box').hidden=T==='tier';$('#contest-chips').hidden=T==='tier';
+  document.querySelectorAll('[data-contest]').forEach(b=>b.setAttribute('aria-pressed',String((b.dataset.contest==='tour')===!!tr.on)));
+  $('#tour-opts').hidden=!on;$('#tour-classic').hidden=T!=='classic';
+  $('#t-bring').checked=!!tr.bring;$('#t-nodst').checked=!!tr.noDstVsQb;$('#t-note').checked=!!tr.noTeFlex;
+  $('#t-maxown').value=tr.maxOwn??'';$('#t-chalk').value=tr.maxChalk??'';$('#t-low').value=tr.minLow??'';
+  const nOwn=sd.players.filter(p=>p.own!=null&&p.own!=='').length;
+  $('#tour-own-note').innerHTML=nOwn?`Ownership loaded for ${nOwn} of ${sd.players.length} players. Players without a number count as 0% and don’t count as low-owned.`
+    :`The three ownership rules need projected ownership. <button class="btn ghost" data-go="sources" style="padding:2px 8px">Upload it on the Projections tab</button>`;$('#s-min').closest('label').hidden=T==='tier';
   renderPlayers();renderSources();renderResults();renderAuto();
 }
 
@@ -881,6 +960,8 @@ function optPool(sd){const T=cfg().type;return sd.players.map(p=>({p,b:blend(p,s
 function checkLocks(sd,pool){
   const c=cfg(),T=c.type;
   if(!sd.players.length)return 'Load a slate first.';
+  if(T==='classic'&&tourOn()&&tour().bring&&!pool.some(x=>x.p.pos==='QB'&&x.p.opp))return 'Bring-back needs each player’s opponent, and this slate file doesn’t have it. Turn off bring-back on the Lineups tab, or import the site’s full player CSV.';
+  if(T==='classic'&&tourOn()&&tour().noTeFlex&&pool.filter(x=>x.p.lock&&x.p.pos==='TE').length>1)return 'Two tight ends are locked, but “No TE in FLEX” is on. Unlock one or turn that rule off.';
   const locked=pool.filter(x=>x.p.lock).map(x=>x.p);
   if(T==='classic'){
     if(!assignSlots(locked))return 'Your locked players don’t fit the roster spots. Unlock someone.';
@@ -896,7 +977,50 @@ function checkLocks(sd,pool){
   return null;
 }
 // One optimal lineup for the current mode. Returns {picks:[players], cpt:player|null} or null.
+// ----- Tournament mode -----
+const TOUR_DEFAULT={on:false,bring:true,noTeFlex:true,noDstVsQb:true,maxOwn:125,maxChalk:2,minLow:1};
+const tour=()=>{if(!S.settings.tour)S.settings.tour=Object.assign({},TOUR_DEFAULT);return S.settings.tour;};
+const tourOn=()=>tour().on&&cfg().type!=='tier';
+const hasOwn=sd=>sd.players.some(p=>p.own!=null&&p.own!=='');
+const ownOf=p=>p.own!=null&&p.own!==''?+p.own:0;
+const isChalk=p=>ownOf(p)>=20;
+const isLow=p=>p.own!=null&&p.own!==''&&+p.own<5;
+// Ownership rules that apply right now (only with ownership data loaded)
+function ownRules(){
+  if(!tourOn()||!hasOwn(site()))return null;
+  const t=tour(),num=v=>v===''||v==null||isNaN(+v)?null:+v;
+  const r={maxOwn:num(t.maxOwn),maxChalk:num(t.maxChalk),minLow:num(t.minLow)||0};
+  return r.maxOwn==null&&r.maxChalk==null&&!r.minLow?null:r;
+}
+function ownStats(ps){return {sum:ps.reduce((s,p)=>s+ownOf(p),0),chalk:ps.filter(isChalk).length,low:ps.filter(isLow).length};}
+function ownProblems(ps,r){
+  const s=ownStats(ps),out=[];
+  if(r.maxOwn!=null&&s.sum>r.maxOwn+1e-9)out.push('own');
+  if(r.maxChalk!=null&&s.chalk>r.maxChalk)out.push('chalk');
+  if(s.low<r.minLow)out.push('low');
+  return out;
+}
+// Penalty weights carried from one lineup to the next so later lineups start close to the rules
+let TOUR_M={lam:0,mu:0,nu:0};let LAST_FAIL='';
+function resetTourM(){TOUR_M={lam:0,mu:0,nu:0};}
 function solveFor(pool,noise){
+  LAST_FAIL='';
+  const rules=ownRules();
+  if(!rules)return solveOnce(pool,noise,null);
+  const base=pool.map(({p,b})=>({p,b:Math.max(0,(b||0)*(noise?1+noise*gauss():1))}));
+  for(let it=0;it<10;it++){
+    const adj=base.map(({p,b})=>({p,b:Math.max(0.01,b-TOUR_M.lam*ownOf(p)-TOUR_M.mu*(isChalk(p)?1:0)+TOUR_M.nu*(isLow(p)?1:0))}));
+    const r=solveOnce(adj,0,null);
+    if(!r)return null;
+    const bad=ownProblems(r.picks,rules);
+    if(!bad.length){TOUR_M.lam*=0.85;TOUR_M.mu*=0.85;TOUR_M.nu*=0.85;return r;}
+    if(bad.includes('own'))TOUR_M.lam=TOUR_M.lam?TOUR_M.lam*1.7:0.05;
+    if(bad.includes('chalk'))TOUR_M.mu=TOUR_M.mu?TOUR_M.mu*1.7:1.5;
+    if(bad.includes('low'))TOUR_M.nu=TOUR_M.nu?TOUR_M.nu*1.7:1.5;
+  }
+  LAST_FAIL='own';return null;
+}
+function solveOnce(pool,noise){
   const c=cfg(),st=S.settings,T=c.type;
   const minSal=+(st.minSal&&st.minSal[dkey()])||0;
   const nv=b=>Math.max(0,(b||0)*(noise?1+noise*gauss():1));
@@ -909,8 +1033,10 @@ function solveFor(pool,noise){
     const r=solveShowdown(items,{capU:Math.floor(c.cap/c.unit),minU:Math.ceil(minSal/c.unit),flexN:5,bothTeams:c.bothTeams});
     return r&&{picks:r.picks.map(i=>i.ref),cpt:r.cpt.ref};
   }
-  const items=pool.map(({p,b},idx)=>({idx,ref:p,pos:p.pos,team:p.team,c:Math.round(p.sal/c.unit),lock:p.lock,v:nv(b)}));
-  const r=solveLineup(items,{capU:Math.floor(c.cap/c.unit),minU:Math.ceil(minSal/c.unit),stack:+st.stack,qbLimit:16});
+  const items=pool.map(({p,b},idx)=>({idx,ref:p,pos:p.pos,team:p.team,opp:p.opp||'',c:Math.round(p.sal/c.unit),lock:p.lock,v:nv(b)}));
+  const tr=tourOn()?tour():null;
+  const r=solveLineup(items,{capU:Math.floor(c.cap/c.unit),minU:Math.ceil(minSal/c.unit),stack:+st.stack,qbLimit:tr?10:16,
+    bring:!!(tr&&tr.bring),noTeFlex:!!(tr&&tr.noTeFlex),noDstVsQb:!!(tr&&tr.noDstVsQb),fast:!!tr});
   return r&&{picks:r.picks.map(i=>i.ref),cpt:null};
 }
 // Put players into QB, RB, RB, WR, WR, WR, TE, FLEX, DST. Returns null if they don't fit.
@@ -923,9 +1049,10 @@ function assignSlots(players){
 }
 const lockSig=sd=>sd.players.filter(p=>p.lock).map(p=>p.id+(p.cpt?'*':'')).sort().join('|');
 function fillLineup(){
-  const sd=site(),pool=optPool(sd);
+  const sd=site(),pool=optPool(sd);resetTourM();
   const problem=checkLocks(sd,pool);if(problem){S.luMsg=problem;renderPlayers();return;}
   const r=solveFor(pool,0);
+  if(!r&&LAST_FAIL==='own'){S.luMsg='Couldn’t meet your ownership rules around these locks. Raise the max ownership or chalk limit on the Lineups tab, or unlock a popular player.';sd.fill=null;renderPlayers();return;}
   if(!r){S.luMsg='No lineup fits around these locks. Try unlocking someone'+(cfg().type==='classic'?', or loosen the stack rule or minimum salary on the Lineups tab.':'.');sd.fill=null;renderPlayers();return;}
   sd.fill={sig:lockSig(sd),ids:r.picks.map(p=>p.id),cpt:r.cpt?r.cpt.id:null};
   S.luMsg='';save();renderPlayers();
@@ -964,7 +1091,7 @@ function lineupCardHTML(sd){
   const fillLabel=T==='tier'?(open===total?'Pick best in each tier':open?'Pick the rest':'Re-pick'):(open===total?'Build best lineup':open?'Fill open spots':'Refill');
   const hint=T==='tier'?`Pick players in the list below and they move here. ${sugg?'Unlocked picks are the top projection in each tier; lock any you want to keep.':''}`
     :T==='sd'?`Lock players below to put them in FLEX, or tap ${c.capt[0]} to lock one as ${c.capt}. ${sugg?'Unlocked players are the optimizer’s picks; lock any you want to keep.':''}${c.bothTeams?' Lineups always include both teams.':''}`
-    :`Lock players in the list below and they move here. ${sugg?'Players without a lock are the optimizer’s picks; lock any you want to keep. ':''}${stackTxt?`Uses your ${stackTxt} rule from the Lineups tab.`:''}`;
+    :`Lock players in the list below and they move here. ${sugg?'Players without a lock are the optimizer’s picks; lock any you want to keep. ':''}${tourOn()?'Tournament mode is on, so the fill follows your tournament rules from the Lineups tab.':stackTxt?`Uses your ${stackTxt} rule from the Lineups tab.`:''}`;
   return `<details class="card lucard" ${S.luOpen===false?'':'open'}><summary><h2>Your lineup</h2><span class="capline">${summary}</span></summary>
     <ol class="slots">${rows}</ol>
     ${T!=='tier'&&left<0?'<p class="msg err">Over the salary cap.</p>':''}
@@ -983,7 +1110,7 @@ async function build(){
   const pool=optPool(sd);
   const err=t=>{msg.innerHTML=`<p class="msg err">${t}</p>`;};
   const problem=checkLocks(sd,pool);if(problem)return err(problem);
-  building=true;$('#go').disabled=true;$('#prog').hidden=false;const bar=$('#prog i');bar.style.width='0';
+  building=true;resetTourM();$('#go').disabled=true;$('#prog').hidden=false;const bar=$('#prog i');bar.style.width='0';
   const out=[],keys=new Set(),counts={};
   let stopNote='';
   for(let i=0;i<n;i++){
@@ -998,10 +1125,11 @@ async function build(){
       if(!keys.has(k)){keys.add(k);break;}
       res=null;noise=Math.max(noise*1.4,0.06)+0.03;
     }
+    if(!res&&LAST_FAIL==='own'){stopNote=out.length?`Stopped at ${out.length}: the next lineup couldn’t meet your ownership rules. Loosen them, raise max exposure or lower your locks to get more.`:'Couldn’t build a lineup that meets your ownership rules. Raise the max total ownership or chalk limit, or lower “min players under 5%”.';break;}
     if(!res){stopNote=out.length?`Stopped at ${out.length}: no more unique lineups fit your locks, exposure caps${c.type==='classic'?' and stack rule':''}.`:'No valid lineup fits these rules. Try fewer locks'+(c.type==='classic'?', a looser stack rule or a lower minimum salary.':'.');break;}
     const ids=res.picks.map(p=>p.id);ids.forEach(id=>counts[id]=(counts[id]||0)+1);
     const proj=res.picks.reduce((s,p)=>s+(blend(p,sd.sources)||0),0)+(res.cpt?0.5*(blend(res.cpt,sd.sources)||0):0);
-    out.push({ids,cpt:res.cpt?res.cpt.id:null,proj});
+    out.push({ids,cpt:res.cpt?res.cpt.id:null,proj,own:hasOwn(sd)?+ownStats(res.picks).sum.toFixed(1):null});
     bar.style.width=((i+1)/n*100)+'%';
   }
   out.sort((a,b)=>b.proj-a.proj);
@@ -1012,6 +1140,15 @@ async function build(){
 }
 
 // ----- Demo slate -----
+// Made-up ownership: popular when cheap for their points, plus noise
+function demoOwn(players,rnd){
+  const byPos={};players.forEach(p=>{(byPos[p.pos]=byPos[p.pos]||[]).push(p);});
+  for(const list of Object.values(byPos)){
+    list.forEach(p=>p._v=(p.proj.d1||0)/Math.max(1,p.sal)+(p.proj.d1||0)/400);
+    list.sort((a,b)=>b._v-a._v);
+    list.forEach((p,i)=>{const share=Math.max(0.2,(list.length>6?42:60)*Math.exp(-i/(list.length/5))*(0.6+rnd()*0.8));p.own=+share.toFixed(1);delete p._v;});
+  }
+}
 function demo(){
   let seed=20261109;const rnd=()=>{seed=(seed*16807)%2147483647;return seed/2147483647;};
   const teams=['KC','BUF','PHI','DAL','SF','SEA','DET','GB','CIN','BAL','MIA','NYJ'];
@@ -1033,6 +1170,7 @@ function demo(){
   for(const sk of ['dk','fd','yh']){
     const players=base.filter(b=>b.pos!=='K').map((b,i)=>{const [lo,hi]=sal[sk][b.pos],[pl,ph]=rng[b.pos];let s=lo+(b.true-pl)/(ph-pl)*(hi-lo)*(0.85+rnd()*0.3);s=Math.max(lo,Math.min(hi,s));s=sk==='yh'?Math.round(s):Math.round(s/100)*100;
       return P({id:(sk==='dk'?String(30000000+i):sk==='fd'?'121000-'+(1000+i):'nfl.p.'+(5000+i)),name:b.name,pos:b.pos,team:b.team,opp:b.opp,sal:s,proj:projFor(b,sk)});});
+    demoOwn(players,rnd);
     S.data[sk]={players,lineups:[],sources:sources(players.length)};
   }
   // Showdown / single game: KC vs BUF
@@ -1041,6 +1179,7 @@ function demo(){
     const players=game.map((b,i)=>{let s=sk==='dk'?1000+b.true*520*(0.85+rnd()*0.3):5000+b.true*480*(0.85+rnd()*0.3);s=Math.round(s/100)*100;
       const id=sk==='dk'?String(31000000+i):'122000-'+(2000+i);
       return P({id,name:b.name,pos:b.pos,team:b.team,opp:b.opp,sal:s,cptId:sk==='dk'?String(31500000+i):id,cptSal:Math.round(s*1.5/100)*100,proj:projFor(b,sk)});});
+    demoOwn(players,rnd);
     S.data[sk+'_sd']={players,lineups:[],sources:sources(players.length)};
   }
   // Tiers: six tiers drawn from the full slate
@@ -1092,7 +1231,19 @@ document.addEventListener('click',e=>{
   if(t.id==='sal-import'){doSal($('#sal-text').value);return;}
   if(t.id==='src-parse'){try{readSource($('#src-text').value);$('#src-msg').innerHTML='';}catch(er){$('#src-msg').innerHTML=`<p class="msg err">${esc(er.message)}</p>`;}return;}
   if(t.id==='src-import'){try{const r=commitSource();$('#src-msg').innerHTML=`<p class="msg">Imported ${esc(r.name)}: ${r.matched} players matched.${r.miss.length?` Not on this slate or not matched (${r.miss.length}): ${esc(r.miss.slice(0,12).join(', '))}${r.miss.length>12?'…':''}`:''}</p>`;}catch(er){$('#src-msg').innerHTML=`<p class="msg err">${esc(er.message)}</p>`;}return;}
+  if(t.dataset.contest){
+    const tr=tour(),on=t.dataset.contest==='tour';
+    if(on&&!tr.on){
+      tr.on=true;
+      if((+S.settings.stack||0)<2)S.settings.stack=2;
+      if(!S.settings.minSal)S.settings.minSal={};
+      const c=cfg();if(!S.settings.minSal[dkey()])S.settings.minSal[dkey()]=Math.round(c.cap*0.99/c.unit)*c.unit;
+    }else if(!on)tr.on=false;
+    site().fill=null;save();renderAll();return;}
   if(t.id==='go'){build();return;}
+  if(t.id==='own-paste-toggle'){$('#own-paste').hidden=!$('#own-paste').hidden;return;}
+  if(t.id==='own-import'){doOwn($('#own-text').value);return;}
+  if(t.id==='own-clear'){site().players.forEach(p=>p.own=null);site().ownFile=null;site().fill=null;save();renderAll();return;}
   if(t.id==='mine-paste-toggle'){$('#mine-paste').hidden=!$('#mine-paste').hidden;return;}
   if(t.id==='mine-import'){doMine($('#mine-text').value);return;}
   if(t.id==='mine-remove'){const sd=site();sd.sources=sd.sources.filter(s=>s.id!=='mine');sd.players.forEach(p=>delete p.proj.mine);sd.fill=null;sd.lineups=[];save();renderAll();return;}
@@ -1133,6 +1284,11 @@ document.addEventListener('change',e=>{
   if(t.name==='mine-mode'){const s=site().sources.find(x=>x.id==='mine');if(s){s.override=t.value==='override';site().fill=null;save();renderAll();}return;}
   if(t.dataset.f){const id=t.closest('tr').dataset.id;const p=site().players.find(x=>x.id===id);const v=t.value.trim();p[t.dataset.f]=v===''?null:+v;save();renderPlayers();return;}
   const st=S.settings;
+  if(t.id&&t.id.startsWith('t-')){const tr=tour();
+    if(t.id==='t-bring')tr.bring=t.checked;if(t.id==='t-nodst')tr.noDstVsQb=t.checked;if(t.id==='t-note')tr.noTeFlex=t.checked;
+    const nv=v=>v.trim()===''?'':Math.max(0,+v);
+    if(t.id==='t-maxown')tr.maxOwn=nv(t.value);if(t.id==='t-chalk')tr.maxChalk=nv(t.value);if(t.id==='t-low')tr.minLow=nv(t.value);
+    site().fill=null;save();return;}
   if(t.id==='s-n')st.n=Math.max(1,Math.min(150,parseInt(t.value)||1));
   if(t.id==='s-stack')st.stack=+t.value;
   if(t.id==='s-rand')st.rand=Math.max(0,Math.min(50,+t.value||0));
